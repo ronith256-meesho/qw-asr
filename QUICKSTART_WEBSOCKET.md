@@ -131,6 +131,14 @@ INFO - Starting microphone streaming. Press Ctrl+C to stop.
 
 ## Troubleshooting
 
+### Browser shows security warning
+This is normal for self-signed certificates. Click **"Advanced"** → **"Proceed to localhost"**. For production, use a real certificate from Let's Encrypt or your CA.
+
+### "Cannot access microphone"
+- Make sure you're using HTTPS (use `--generate-self-signed-cert`)
+- Check browser permissions (Settings → Privacy → Microphone)
+- Try a different browser (Chrome/Firefox recommended)
+
 ### "Module websockets not found"
 ```bash
 pip install websockets

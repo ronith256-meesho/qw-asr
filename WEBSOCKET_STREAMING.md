@@ -64,14 +64,27 @@ pip install pyaudio
 
 ### 1. Start the WebSocket Server
 
+**With HTTPS (Required for Browser Microphone Access):**
+
 ```bash
 qwen-asr-serve-websocket \
-    --asr-model-path Qwen/Qwen3-ASR-1.7B \
-    --gpu-memory-utilization 0.8 \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --vad-threshold 0.5 \
-    --silence-threshold 0.8
+  --asr-model-path Qwen/Qwen3-ASR-1.7B \
+  --gpu-memory-utilization 0.8 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --vad-threshold 0.5 \
+  --silence-threshold 0.8 \
+  --generate-self-signed-cert
+```
+
+**Note:** Modern browsers require HTTPS to access the microphone. The `--generate-self-signed-cert` flag automatically creates a certificate for testing. Your browser will show a security warning - this is normal. Click "Advanced" → "Proceed" to continue.
+
+**For production with real certificate:**
+```bash
+qwen-asr-serve-websocket \
+  --asr-model-path Qwen/Qwen3-ASR-1.7B \
+  --ssl-certfile /path/to/cert.pem \
+  --ssl-keyfile /path/to/key.pem
 ```
 
 **Server Options:**
@@ -83,13 +96,18 @@ qwen-asr-serve-websocket \
 | `--max-new-tokens` | `32` | Max tokens per chunk |
 | `--host` | `0.0.0.0` | Server bind address |
 | `--port` | `8000` | Server port |
+| `--generate-self-signed-cert` | `False` | Auto-generate SSL certificate for HTTPS |
+| `--ssl-certfile` | `None` | Path to SSL certificate file |
+| `--ssl-keyfile` | `None` | Path to SSL private key file |
 | `--vad-threshold` | `0.5` | Speech probability threshold (0.0-1.0) |
 | `--silence-threshold` | `0.8` | Seconds of silence for endpointing |
 | `--min-speech-duration` | `0.3` | Min speech duration before processing |
 
 ### 2. Test in Browser
 
-Open `http://localhost:8000` in your browser. The server includes a built-in HTML client for testing.
+Open `https://localhost:8000` in your browser. The server includes a built-in HTML client for testing.
+
+**Note:** You'll see a security warning because of the self-signed certificate. This is normal - click "Advanced" → "Proceed to localhost" to continue.
 
 ### 3. Use Python Client
 
@@ -252,10 +270,14 @@ Audio Stream
 ### Silero VAD Characteristics
 
 - **Sample Rate**: Requires 16kHz audio
+- **Minimum Chunk Size**: 512 samples (32ms at 16kHz)
+- **Optimal Chunk Size**: 512, 1024, or 1536 samples (multiples of 512)
 - **Languages**: Language-agnostic (works on any language)
 - **Noise Robustness**: High (trained on diverse acoustic conditions)
 - **Model Size**: ~2MB (lightweight)
 - **Latency**: ~5-10ms per 100ms chunk (GPU)
+
+**Important:** The server automatically ensures chunks are large enough for VAD (minimum 512 samples). Smaller chunks are buffered and assumed to be speech.
 
 ### VAD Threshold Guide
 
@@ -311,10 +333,22 @@ async def voice_bot_handler(call_session):
 
 ## Troubleshooting
 
+### Browser Cannot Access Microphone
+**Problem:** Browser blocks microphone access
+**Solution:** Use HTTPS with `--generate-self-signed-cert` flag. Modern browsers require HTTPS for microphone access.
+
+### Browser Security Warning
+**Problem:** "Your connection is not private" warning
+**Solution:** This is normal for self-signed certificates. Click "Advanced" → "Proceed to localhost (unsafe)". For production, use a real certificate.
+
 ### VAD Not Working
 - Check if Silero VAD downloaded successfully
 - Ensure audio is 16kHz, mono, float32
 - Try adjusting `--vad-threshold`
+
+### VAD Error "unsupported number of samples"
+**Problem:** Audio chunks too small for VAD
+**Solution:** This is now handled automatically. The server buffers small chunks until they reach the minimum size (512 samples). If you still see this error, check that audio is being sent at 16kHz sample rate.
 
 ### High CPU Usage
 - VAD runs on CPU by default

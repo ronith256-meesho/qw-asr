@@ -455,8 +455,11 @@ qwen-asr-serve-websocket \
   --host 0.0.0.0 \
   --port 8000 \
   --vad-threshold 0.5 \
-  --silence-threshold 0.8
+  --silence-threshold 0.8 \
+  --generate-self-signed-cert
 ```
+
+**Note:** The `--generate-self-signed-cert` flag enables HTTPS, which is required for browser microphone access. Your browser will show a security warning - this is normal for testing. Click "Advanced" → "Proceed" to continue.
 
 **Key Features:**
 - ⚡ **WebSocket Communication**: Persistent connection with low overhead

@@ -63,6 +63,10 @@ class SileroVAD:
         self.threshold = threshold
         self.sample_rate = sample_rate
         
+        # Silero VAD requires specific chunk sizes
+        # For 16kHz: minimum 512 samples (32ms)
+        self.min_samples = 512
+        
         try:
             # Load Silero VAD model
             self.model, utils = torch.hub.load(
@@ -72,7 +76,7 @@ class SileroVAD:
                 onnx=False
             )
             self.get_speech_timestamps = utils[0]
-            logger.info("Silero VAD loaded successfully")
+            logger.info(f"Silero VAD loaded successfully (min chunk size: {self.min_samples} samples)")
         except Exception as e:
             logger.warning(f"Failed to load Silero VAD: {e}. VAD will be disabled.")
             self.model = None
@@ -90,7 +94,19 @@ class SileroVAD:
         if self.model is None:
             return 1.0  # Assume speech if VAD unavailable
         
+        # Check minimum length requirement
+        if len(audio) < self.min_samples:
+            logger.debug(f"Audio chunk too small for VAD: {len(audio)} < {self.min_samples}, assuming speech")
+            return 1.0  # Assume speech if chunk too small
+        
         try:
+            # Pad or truncate to valid size if needed
+            # Silero VAD works best with chunks that are multiples of 512
+            if len(audio) % self.min_samples != 0:
+                # Truncate to nearest multiple
+                valid_len = (len(audio) // self.min_samples) * self.min_samples
+                audio = audio[:valid_len]
+            
             # Convert to torch tensor
             audio_tensor = torch.from_numpy(audio).float()
             
@@ -186,7 +202,7 @@ class SessionManager:
             last_activity=time.time(),
             silence_threshold=self.silence_threshold,
             min_speech_duration=self.min_speech_duration,
-            vad_sample_size=int(0.1 * 16000),  # 100ms chunks for VAD
+            vad_sample_size=max(int(0.1 * 16000), vad.min_samples),  # At least VAD min size (512)
         )
         
         self.sessions[session_id] = session

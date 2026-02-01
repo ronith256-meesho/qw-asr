@@ -4,7 +4,7 @@
 echo "Installing WebSocket streaming dependencies..."
 
 # Install base dependencies
-pip install -U fastapi uvicorn[standard] websockets
+pip install -U fastapi uvicorn[standard] websockets cryptography
 
 # Try to install PyAudio (optional, for client microphone support)
 echo ""
@@ -42,7 +42,10 @@ except Exception as e:
 echo ""
 echo "Installation complete!"
 echo ""
-echo "To start the WebSocket server:"
-echo "  qwen-asr-serve-websocket --asr-model-path Qwen/Qwen3-ASR-1.7B"
+echo "To start the WebSocket server with HTTPS (for microphone access):"
+echo "  qwen-asr-serve-websocket --asr-model-path Qwen/Qwen3-ASR-1.7B --generate-self-signed-cert"
+echo ""
+echo "Then open https://localhost:8000 in your browser"
+echo "(You'll see a security warning - click 'Advanced' → 'Proceed')"
 echo ""
 echo "For more information, see WEBSOCKET_STREAMING.md"

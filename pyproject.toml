@@ -42,6 +42,7 @@ websocket = [
   "uvicorn[standard]",
   "websockets",
   "pyaudio",
+  "cryptography",
 ]
 
 [project.urls]

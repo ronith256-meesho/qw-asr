@@ -174,6 +174,9 @@ class SessionManager:
         silence_threshold: float = 0.8,
         min_speech_duration: float = 0.3,
         session_ttl: float = 600.0,
+        default_language: Optional[str] = None,
+        default_prompt: Optional[str] = None,
+        default_context: str = "",
     ):
         self.asr_model = asr_model
         self.sessions: Dict[str, StreamingSession] = {}
@@ -181,8 +184,16 @@ class SessionManager:
         self.silence_threshold = silence_threshold
         self.min_speech_duration = min_speech_duration
         self.session_ttl = session_ttl
+        self.default_language = default_language
+        self.default_prompt = default_prompt
+        self.default_context = default_context
         
         logger.info(f"SessionManager initialized with VAD threshold={vad_threshold}")
+        if default_language:
+            logger.info(f"Default language: {default_language}")
+        if default_prompt:
+            logger.info(f"Default prompt: {default_prompt[:100]}...")
+
     
     def create_session(
         self,
@@ -191,13 +202,28 @@ class SessionManager:
         unfixed_chunk_num: int = 4,
         unfixed_token_num: int = 5,
         chunk_size_sec: float = 1.0,
+        prompt: Optional[str] = None,
     ) -> str:
         """Create a new streaming session."""
         session_id = uuid.uuid4().hex
         
+        # Use defaults if not provided
+        if language is None:
+            language = self.default_language
+        if prompt is None:
+            prompt = self.default_prompt
+        if not context:
+            context = self.default_context
+        
+        # Build enhanced context with prompt if provided
+        enhanced_context = context
+        if prompt:
+            # Add custom prompt to context
+            enhanced_context = f"{prompt}\n\n{context}" if context else prompt
+        
         # Initialize ASR streaming state
         asr_state = self.asr_model.init_streaming_state(
-            context=context,
+            context=enhanced_context,
             language=language,
             unfixed_chunk_num=unfixed_chunk_num,
             unfixed_token_num=unfixed_token_num,
@@ -224,7 +250,7 @@ class SessionManager:
         )
         
         self.sessions[session_id] = session
-        logger.info(f"Created session {session_id}")
+        logger.info(f"Created session {session_id} (language: {language}, prompt: {prompt[:50] if prompt else 'None'}...)")
         
         return session_id
     
@@ -300,6 +326,7 @@ async def websocket_asr_endpoint(websocket: WebSocket):
             unfixed_chunk_num=config_msg.get("unfixed_chunk_num", 4),
             unfixed_token_num=config_msg.get("unfixed_token_num", 5),
             chunk_size_sec=config_msg.get("chunk_size_sec", 1.0),
+            prompt=config_msg.get("prompt"),  # NEW: Support custom prompts
         )
         
         session = session_manager.get_session(session_id)
@@ -376,13 +403,18 @@ async def process_audio_chunk(
     """
     Process incoming audio chunk with VAD and streaming ASR.
     
+    Improved logic:
+    - Start ASR immediately when speech detected (don't wait for min_duration)
+    - Process accumulated audio in larger chunks for better accuracy
+    - Faster finalization by flushing remaining audio
+    
     Returns:
         Response dict to send to client, or None if no update
     """
     # Add to buffer
     session.audio_buffer = np.concatenate([session.audio_buffer, audio_chunk])
     
-    # Run VAD on accumulated buffer (check every 100ms worth of audio)
+    # Run VAD on accumulated buffer (check every VAD sample size)
     while len(session.audio_buffer) >= session.vad_sample_size:
         vad_chunk = session.audio_buffer[:session.vad_sample_size]
         speech_prob = session.vad.is_speech(vad_chunk)
@@ -398,8 +430,9 @@ async def process_audio_chunk(
             
             session.speech_duration += chunk_duration
             
-            # Feed to ASR if we have enough speech
-            if session.speech_duration >= session.min_speech_duration:
+            # IMPROVED: Start processing immediately, accumulate more for better context
+            # Don't wait for min_speech_duration - process all speech chunks
+            try:
                 # Process through ASR
                 session_manager.asr_model.streaming_transcribe(
                     vad_chunk,
@@ -409,15 +442,20 @@ async def process_audio_chunk(
                 # Remove processed audio from buffer
                 session.audio_buffer = session.audio_buffer[session.vad_sample_size:]
                 
-                # Return partial transcript
-                return {
-                    "type": "partial",
-                    "language": session.asr_state.language or "",
-                    "text": session.asr_state.text or "",
-                    "timestamp": time.time(),
-                }
-            else:
-                # Accumulating speech, remove from buffer but don't process yet
+                # Return partial transcript (only if we have text)
+                if session.asr_state.text:
+                    return {
+                        "type": "partial",
+                        "language": session.asr_state.language or "",
+                        "text": session.asr_state.text or "",
+                        "timestamp": time.time(),
+                    }
+                else:
+                    # Still accumulating, no text yet
+                    pass
+            except Exception as e:
+                logger.error(f"ASR processing error: {e}")
+                # Remove chunk from buffer even on error
                 session.audio_buffer = session.audio_buffer[session.vad_sample_size:]
         
         else:
@@ -427,10 +465,25 @@ async def process_audio_chunk(
             if session.is_speaking:
                 # Check for endpointing
                 if session.silence_duration >= session.silence_threshold:
-                    logger.info(f"Speech ended (session {session.session_id})")
+                    logger.info(f"Speech ended (session {session.session_id}), finalizing...")
+                    
+                    # IMPROVED: Process any remaining audio in buffer before finalizing
+                    if len(session.audio_buffer) > 0:
+                        try:
+                            # Flush remaining audio
+                            logger.info(f"Flushing {len(session.audio_buffer)} remaining samples")
+                            session_manager.asr_model.streaming_transcribe(
+                                session.audio_buffer,
+                                session.asr_state
+                            )
+                        except Exception as e:
+                            logger.error(f"Error flushing audio: {e}")
                     
                     # Finalize the current utterance
-                    session_manager.asr_model.finish_streaming_transcribe(session.asr_state)
+                    try:
+                        session_manager.asr_model.finish_streaming_transcribe(session.asr_state)
+                    except Exception as e:
+                        logger.error(f"Error finishing transcription: {e}")
                     
                     result = {
                         "type": "final",
@@ -446,15 +499,19 @@ async def process_audio_chunk(
                     session.speech_duration = 0.0
                     session.audio_buffer = np.zeros((0,), dtype=np.float32)
                     
-                    # Re-initialize streaming state for next utterance
+                    # Re-initialize streaming state for next utterance (preserve context and language)
+                    original_context = session.asr_state.context
+                    original_language = session.asr_state.force_language
+                    
                     session.asr_state = session_manager.asr_model.init_streaming_state(
-                        context=session.asr_state.context,
-                        language=session.asr_state.force_language,
+                        context=original_context,
+                        language=original_language,
                         unfixed_chunk_num=session.asr_state.unfixed_chunk_num,
                         unfixed_token_num=session.asr_state.unfixed_token_num,
                         chunk_size_sec=session.asr_state.chunk_size_sec,
                     )
                     
+                    logger.info(f"Session reset for next utterance")
                     return result
             
             # Remove silence from buffer
@@ -921,6 +978,21 @@ def parse_args():
         help="ASR chunk size in seconds"
     )
     
+    # Context and prompting args
+    parser.add_argument(
+        "--default-language",
+        help="Default language for ASR (e.g., 'English', 'Hindi')"
+    )
+    parser.add_argument(
+        "--default-prompt",
+        help="Default system prompt for ASR context"
+    )
+    parser.add_argument(
+        "--default-context",
+        default="",
+        help="Default context string for all sessions"
+    )
+    
     return parser.parse_args()
 
 
@@ -1039,6 +1111,9 @@ def main():
         vad_threshold=args.vad_threshold,
         silence_threshold=args.silence_threshold,
         min_speech_duration=args.min_speech_duration,
+        default_language=args.default_language,
+        default_prompt=args.default_prompt,
+        default_context=args.default_context,
     )
     
     # Start cleanup task

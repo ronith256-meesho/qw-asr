@@ -137,6 +137,128 @@ class SileroVAD:
             return 1.0  # Assume speech on error
 
 
+# ============= DeepFilterNet Integration =============
+
+class DeepFilterNetProcessor:
+    """Server-side noise suppression using DeepFilterNet."""
+    
+    def __init__(
+        self, 
+        model_name: str = "DeepFilterNet3",
+        post_filter: bool = False,
+        sample_rate: int = 16000
+    ):
+        """
+        Initialize DeepFilterNet processor for real-time noise suppression.
+        
+        Args:
+            model_name: Model version (DeepFilterNet, DeepFilterNet2, DeepFilterNet3)
+            post_filter: Enable post-filter for additional noise reduction
+            sample_rate: Audio sample rate (currently only 48kHz supported by DF)
+        """
+        self.model_name = model_name
+        self.post_filter = post_filter
+        self.sample_rate = sample_rate
+        self.model = None
+        self.df_state = None
+        
+        # DeepFilterNet natively operates at 48kHz
+        # We'll need to resample 16kHz -> 48kHz -> 16kHz
+        self.df_sample_rate = 48000
+        self.resample_needed = (sample_rate != self.df_sample_rate)
+        
+        try:
+            # Lazy import to avoid dependency if not used
+            from df import enhance, init_df
+            import librosa
+            
+            self.enhance = enhance
+            self.librosa = librosa
+            
+            # Load DeepFilterNet model
+            logger.info(f"Loading {model_name} for noise suppression...")
+            self.model, self.df_state, _ = init_df(
+                model_base_dir=model_name,
+                post_filter=post_filter,
+                log_level="warning"
+            )
+            
+            # Move model to GPU if available
+            if torch.cuda.is_available():
+                self.model = self.model.cuda()
+                logger.info(f"{model_name} loaded on GPU")
+            else:
+                logger.info(f"{model_name} loaded on CPU")
+            
+            logger.info(f"{model_name} initialized successfully (resample: {self.resample_needed})")
+            
+        except ImportError as e:
+            logger.warning(f"DeepFilterNet not installed: {e}. Install with: pip install deepfilternet")
+            logger.warning("Noise suppression will be disabled.")
+        except Exception as e:
+            logger.warning(f"Failed to load {model_name}: {e}")
+            logger.warning("Noise suppression will be disabled.")
+    
+    def is_available(self) -> bool:
+        """Check if DeepFilterNet is available."""
+        return self.model is not None
+    
+    def process_chunk(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Apply noise suppression to audio chunk.
+        
+        Args:
+            audio: Audio samples (float32, shape: (samples,))
+        
+        Returns:
+            Enhanced audio samples (same shape as input)
+        """
+        if not self.is_available():
+            return audio  # Pass through if unavailable
+        
+        try:
+            # DeepFilterNet expects 48kHz audio
+            if self.resample_needed:
+                # Resample 16kHz -> 48kHz
+                audio_48k = self.librosa.resample(
+                    audio, 
+                    orig_sr=self.sample_rate, 
+                    target_sr=self.df_sample_rate
+                )
+            else:
+                audio_48k = audio
+            
+            # Apply enhancement
+            enhanced_48k = self.enhance(self.model, self.df_state, audio_48k)
+            
+            # Resample back to original sample rate
+            if self.resample_needed:
+                enhanced = self.librosa.resample(
+                    enhanced_48k,
+                    orig_sr=self.df_sample_rate,
+                    target_sr=self.sample_rate
+                )
+            else:
+                enhanced = enhanced_48k
+            
+            # Ensure output is float32 and same length as input
+            enhanced = enhanced.astype(np.float32)
+            
+            # Handle potential length mismatch due to resampling
+            if len(enhanced) < len(audio):
+                # Pad with zeros
+                enhanced = np.pad(enhanced, (0, len(audio) - len(enhanced)), mode='constant')
+            elif len(enhanced) > len(audio):
+                # Truncate
+                enhanced = enhanced[:len(audio)]
+            
+            return enhanced
+            
+        except Exception as e:
+            logger.error(f"DeepFilterNet processing error: {e}")
+            return audio  # Return original on error
+
+
 # ============= Streaming Session Manager =============
 
 @dataclass
@@ -145,23 +267,29 @@ class StreamingSession:
     session_id: str
     asr_state: object  # ASRStreamingState from Qwen3ASRModel
     vad: SileroVAD
+    dfn: Optional[object] = None  # DeepFilterNetProcessor (optional)
     
     # Audio buffering
-    audio_buffer: np.ndarray
+    audio_buffer: np.ndarray = None
     
     # VAD state
-    is_speaking: bool
-    silence_duration: float  # seconds of silence
-    speech_duration: float   # seconds of speech
+    is_speaking: bool = False
+    silence_duration: float = 0.0  # seconds of silence
+    speech_duration: float = 0.0   # seconds of speech
     
     # Timestamps
-    created_at: float
-    last_activity: float
+    created_at: float = 0.0
+    last_activity: float = 0.0
     
     # Configuration
-    silence_threshold: float  # seconds of silence to trigger endpointing
-    min_speech_duration: float  # minimum speech duration before processing
-    vad_sample_size: int  # samples to accumulate before VAD check
+    silence_threshold: float = 0.8  # seconds of silence to trigger endpointing
+    min_speech_duration: float = 0.3  # minimum speech duration before processing
+    vad_sample_size: int = 512  # samples to accumulate before VAD check
+    
+    def __post_init__(self):
+        """Initialize mutable defaults."""
+        if self.audio_buffer is None:
+            self.audio_buffer = np.zeros((0,), dtype=np.float32)
 
 
 class SessionManager:
@@ -177,6 +305,9 @@ class SessionManager:
         default_language: Optional[str] = None,
         default_prompt: Optional[str] = None,
         default_context: str = "",
+        enable_noise_suppression: bool = False,
+        dfn_model_name: str = "DeepFilterNet3",
+        dfn_post_filter: bool = False,
     ):
         self.asr_model = asr_model
         self.sessions: Dict[str, StreamingSession] = {}
@@ -187,8 +318,28 @@ class SessionManager:
         self.default_language = default_language
         self.default_prompt = default_prompt
         self.default_context = default_context
+        self.enable_noise_suppression = enable_noise_suppression
+        self.dfn_model_name = dfn_model_name
+        self.dfn_post_filter = dfn_post_filter
+        
+        # Initialize shared DeepFilterNet processor if enabled
+        self.dfn_processor = None
+        if enable_noise_suppression:
+            logger.info("Initializing DeepFilterNet for noise suppression...")
+            self.dfn_processor = DeepFilterNetProcessor(
+                model_name=dfn_model_name,
+                post_filter=dfn_post_filter,
+                sample_rate=16000
+            )
+            if self.dfn_processor.is_available():
+                logger.info(f"✓ Noise suppression enabled with {dfn_model_name}")
+            else:
+                logger.warning("✗ Noise suppression requested but DeepFilterNet unavailable")
+                self.enable_noise_suppression = False
         
         logger.info(f"SessionManager initialized with VAD threshold={vad_threshold}")
+        if enable_noise_suppression:
+            logger.info(f"Noise suppression: {dfn_model_name} (post_filter={dfn_post_filter})")
         if default_language:
             logger.info(f"Default language: {default_language}")
         if default_prompt:
@@ -238,6 +389,7 @@ class SessionManager:
             session_id=session_id,
             asr_state=asr_state,
             vad=vad,
+            dfn=self.dfn_processor,  # Share the processor across sessions
             audio_buffer=np.zeros((0,), dtype=np.float32),
             is_speaking=False,
             silence_duration=0.0,
@@ -250,7 +402,8 @@ class SessionManager:
         )
         
         self.sessions[session_id] = session
-        logger.info(f"Created session {session_id} (language: {language}, prompt: {prompt[:50] if prompt else 'None'}...)")
+        noise_status = "with noise suppression" if self.enable_noise_suppression else "without noise suppression"
+        logger.info(f"Created session {session_id} {noise_status} (language: {language}, prompt: {prompt[:50] if prompt else 'None'}...)")
         
         return session_id
     
@@ -401,7 +554,12 @@ async def process_audio_chunk(
     audio_chunk: np.ndarray
 ) -> Optional[Dict]:
     """
-    Process incoming audio chunk with VAD and streaming ASR.
+    Process incoming audio chunk with optional DeepFilterNet, VAD and streaming ASR.
+    
+    Pipeline:
+    1. Apply DeepFilterNet noise suppression (if enabled)
+    2. Run VAD on enhanced audio
+    3. Process speech chunks through ASR
     
     Improved logic:
     - Start ASR immediately when speech detected (don't wait for min_duration)
@@ -414,12 +572,23 @@ async def process_audio_chunk(
     # Add to buffer
     session.audio_buffer = np.concatenate([session.audio_buffer, audio_chunk])
     
-    # Run VAD on accumulated buffer (check every VAD sample size)
+    # Run DeepFilterNet + VAD on accumulated buffer (check every VAD sample size)
     while len(session.audio_buffer) >= session.vad_sample_size:
-        vad_chunk = session.audio_buffer[:session.vad_sample_size]
-        speech_prob = session.vad.is_speech(vad_chunk)
+        raw_chunk = session.audio_buffer[:session.vad_sample_size]
         
-        chunk_duration = len(vad_chunk) / 16000.0
+        # Apply noise suppression if enabled
+        if session.dfn and session.dfn.is_available():
+            start_time = time.time()
+            enhanced_chunk = session.dfn.process_chunk(raw_chunk)
+            dfn_latency_ms = (time.time() - start_time) * 1000
+            logger.debug(f"DeepFilterNet latency: {dfn_latency_ms:.1f}ms")
+        else:
+            enhanced_chunk = raw_chunk
+        
+        # Run VAD on enhanced audio
+        speech_prob = session.vad.is_speech(enhanced_chunk)
+        
+        chunk_duration = len(enhanced_chunk) / 16000.0
         
         if speech_prob >= session.vad.threshold:
             # Speech detected
@@ -433,9 +602,9 @@ async def process_audio_chunk(
             # IMPROVED: Start processing immediately, accumulate more for better context
             # Don't wait for min_speech_duration - process all speech chunks
             try:
-                # Process through ASR
+                # Process enhanced audio through ASR (not raw audio)
                 session_manager.asr_model.streaming_transcribe(
-                    vad_chunk,
+                    enhanced_chunk,
                     session.asr_state
                 )
                 
@@ -470,12 +639,19 @@ async def process_audio_chunk(
                     # IMPROVED: Process any remaining audio in buffer before finalizing
                     if len(session.audio_buffer) > 0:
                         try:
+                            # Apply noise suppression to remaining audio if enabled
+                            remaining_audio = session.audio_buffer
+                            if session.dfn and session.dfn.is_available():
+                                remaining_audio = session.dfn.process_chunk(remaining_audio)
+                            
                             # Flush remaining audio
-                            logger.info(f"Flushing {len(session.audio_buffer)} remaining samples")
+                            logger.info(f"Flushing {len(remaining_audio)} remaining samples")
                             session_manager.asr_model.streaming_transcribe(
-                                session.audio_buffer,
+                                remaining_audio,
                                 session.asr_state
                             )
+                        except Exception as e:
+                            logger.error(f"Error flushing audio: {e}")
                         except Exception as e:
                             logger.error(f"Error flushing audio: {e}")
                     
@@ -993,6 +1169,24 @@ def parse_args():
         help="Default context string for all sessions"
     )
     
+    # DeepFilterNet noise suppression args
+    parser.add_argument(
+        "--enable-noise-suppression",
+        action="store_true",
+        help="Enable DeepFilterNet noise suppression (applied before VAD)"
+    )
+    parser.add_argument(
+        "--dfn-model",
+        default="DeepFilterNet3",
+        choices=["DeepFilterNet", "DeepFilterNet2", "DeepFilterNet3"],
+        help="DeepFilterNet model version (requires deepfilternet package)"
+    )
+    parser.add_argument(
+        "--dfn-post-filter",
+        action="store_true",
+        help="Enable DeepFilterNet post-filter for additional noise reduction"
+    )
+    
     return parser.parse_args()
 
 
@@ -1114,6 +1308,9 @@ def main():
         default_language=args.default_language,
         default_prompt=args.default_prompt,
         default_context=args.default_context,
+        enable_noise_suppression=args.enable_noise_suppression,
+        dfn_model_name=args.dfn_model,
+        dfn_post_filter=args.dfn_post_filter,
     )
     
     # Start cleanup task

@@ -444,6 +444,38 @@ qwen-asr-demo-streaming \
 
 Then open `http://<your-ip>:8000`, or access it via port forwarding in tools like VS Code.
 
+### WebSocket Streaming (Recommended for Production)
+
+For production voice bot applications requiring real-time, low-latency ASR with server-side VAD and automatic endpointing, we provide a WebSocket-based streaming server:
+
+```bash
+qwen-asr-serve-websocket \
+  --asr-model-path Qwen/Qwen3-ASR-1.7B \
+  --gpu-memory-utilization 0.8 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --vad-threshold 0.5 \
+  --silence-threshold 0.8
+```
+
+**Key Features:**
+- ⚡ **WebSocket Communication**: Persistent connection with low overhead
+- 🎤 **Server-Side VAD**: Silero VAD for robust speech detection in noisy environments
+- 📊 **Automatic Endpointing**: Detects when user stops speaking naturally
+- 🔄 **Context Preservation**: Maintains ASR state across chunks with KV cache reuse
+- 📱 **Built-in Test Client**: Open `http://localhost:8000` in your browser
+
+**Usage Example (Python Client):**
+```bash
+# Stream from microphone
+python examples/example_websocket_client.py --host localhost --port 8000
+
+# Stream from audio file
+python examples/example_websocket_client.py --audio-file audio.wav
+```
+
+For detailed documentation, protocol specification, and performance tuning guide, see [WEBSOCKET_STREAMING.md](WEBSOCKET_STREAMING.md).
+
 ## Deployment with vLLM
 
 vLLM officially provides day-0 model support for Qwen3-ASR for efficient inference. 

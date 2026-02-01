@@ -37,6 +37,12 @@ dependencies = [
 vllm = [
   "vllm==0.14.0",
 ]
+websocket = [
+  "fastapi",
+  "uvicorn[standard]",
+  "websockets",
+  "pyaudio",
+]
 
 [project.urls]
 Homepage = "https://github.com/Qwen/Qwen3-ASR"
@@ -46,6 +52,7 @@ Repository = "https://github.com/Qwen/Qwen3-ASR"
 qwen-asr-demo = "qwen_asr.cli.demo:main"
 qwen-asr-demo-streaming = "qwen_asr.cli.demo_streaming:main"
 qwen-asr-serve = "qwen_asr.cli.serve:main"
+qwen-asr-serve-websocket = "qwen_asr.cli.serve_websocket:main"
 
 [tool.setuptools]
 packages = { find = { where = ["."] , include = ["qwen_asr*"] } }

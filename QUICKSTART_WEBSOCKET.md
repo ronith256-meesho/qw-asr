@@ -27,6 +27,37 @@ pip install fastapi uvicorn[standard] websockets pyaudio
 
 ## Step 2: Start the Server
 
+### Option A: With Auto-Generated Self-Signed Certificate (Recommended for Testing)
+
+Modern browsers require HTTPS to access the microphone. Use this option for easy setup:
+
+```bash
+qwen-asr-serve-websocket \
+    --asr-model-path Qwen/Qwen3-ASR-1.7B \
+    --gpu-memory-utilization 0.8 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --generate-self-signed-cert
+```
+
+**Browser Warning:** Your browser will show a security warning (this is normal for self-signed certificates). Click **"Advanced"** → **"Proceed to localhost"** to continue.
+
+### Option B: With Your Own SSL Certificate (Production)
+
+```bash
+qwen-asr-serve-websocket \
+    --asr-model-path Qwen/Qwen3-ASR-1.7B \
+    --gpu-memory-utilization 0.8 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --ssl-certfile /path/to/cert.pem \
+    --ssl-keyfile /path/to/key.pem
+```
+
+### Option C: Without HTTPS (File Upload Only)
+
+Without HTTPS, microphone access is blocked by browsers, but you can still test with file upload:
+
 ```bash
 qwen-asr-serve-websocket \
     --asr-model-path Qwen/Qwen3-ASR-1.7B \
@@ -43,17 +74,26 @@ Loading ASR model...
 ASR model loaded successfully
 Silero VAD loaded successfully
 SessionManager initialized with VAD threshold=0.5
-Starting WebSocket server at 0.0.0.0:8000
-Open http://0.0.0.0:8000 in your browser
+✓ Self-signed certificate generated successfully
+  Certificate: qwen_asr_cert.pem
+  Key: qwen_asr_key.pem
+SSL enabled with certificate: qwen_asr_cert.pem
+⚠ Using self-signed certificate - browsers will show security warning
+  This is normal for testing. Click 'Advanced' → 'Proceed' in your browser
+Starting WebSocket server at https://0.0.0.0:8000
+WebSocket endpoint: wss://0.0.0.0:8000/ws/asr
+Open https://0.0.0.0:8000 in your browser
 ```
 
 ## Step 3: Test in Browser
 
-1. Open `http://localhost:8000` in your browser
-2. Click "Start Recording"
-3. Allow microphone access
-4. Speak naturally
-5. Watch real-time transcripts appear
+1. Open `https://localhost:8000` in your browser
+2. **Important:** You'll see a security warning - click **"Advanced"** → **"Proceed to localhost (unsafe)"**
+   - This is normal for self-signed certificates in testing
+3. Click "Start Recording"
+4. Allow microphone access when prompted
+5. Speak naturally
+6. Watch real-time transcripts appear
 
 **You should see:**
 - 📝 Yellow "Partial" boxes during speech

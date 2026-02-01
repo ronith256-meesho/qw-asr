@@ -58,14 +58,24 @@ class SileroVAD:
         
         Args:
             threshold: Speech probability threshold (0.0-1.0)
-            sample_rate: Audio sample rate (must be 16000 for Silero)
+            sample_rate: Audio sample rate (must be 8000 or 16000 for Silero)
         """
         self.threshold = threshold
         self.sample_rate = sample_rate
         
-        # Silero VAD requires specific chunk sizes
-        # For 16kHz: minimum 512 samples (32ms)
-        self.min_samples = 512
+        # Silero VAD requires specific chunk sizes based on sample rate
+        # For 8000 Hz: 256, 512, 768 samples (32ms, 64ms, 96ms)
+        # For 16000 Hz: 512, 1024, 1536 samples (32ms, 64ms, 96ms)
+        if sample_rate == 8000:
+            self.valid_chunk_sizes = [256, 512, 768]
+        elif sample_rate == 16000:
+            self.valid_chunk_sizes = [512, 1024, 1536]
+        else:
+            logger.warning(f"Silero VAD only supports 8000 or 16000 Hz, got {sample_rate}")
+            self.valid_chunk_sizes = [512, 1024, 1536]
+            self.sample_rate = 16000
+        
+        self.min_samples = self.valid_chunk_sizes[0]
         
         try:
             # Load Silero VAD model
@@ -76,7 +86,7 @@ class SileroVAD:
                 onnx=False
             )
             self.get_speech_timestamps = utils[0]
-            logger.info(f"Silero VAD loaded successfully (min chunk size: {self.min_samples} samples)")
+            logger.info(f"Silero VAD loaded successfully (sample rate: {self.sample_rate}Hz, valid chunks: {self.valid_chunk_sizes})")
         except Exception as e:
             logger.warning(f"Failed to load Silero VAD: {e}. VAD will be disabled.")
             self.model = None
@@ -86,7 +96,7 @@ class SileroVAD:
         Check if audio contains speech.
         
         Args:
-            audio: Audio samples (float32, 16kHz)
+            audio: Audio samples (float32, 8kHz or 16kHz)
         
         Returns:
             Speech probability (0.0-1.0)
@@ -100,12 +110,19 @@ class SileroVAD:
             return 1.0  # Assume speech if chunk too small
         
         try:
-            # Pad or truncate to valid size if needed
-            # Silero VAD works best with chunks that are multiples of 512
-            if len(audio) % self.min_samples != 0:
-                # Truncate to nearest multiple
-                valid_len = (len(audio) // self.min_samples) * self.min_samples
-                audio = audio[:valid_len]
+            # Find the closest valid chunk size
+            valid_size = None
+            for size in self.valid_chunk_sizes:
+                if len(audio) >= size:
+                    valid_size = size
+                    break
+            
+            if valid_size is None:
+                # Use minimum size
+                valid_size = self.min_samples
+            
+            # Truncate to valid size
+            audio = audio[:valid_size]
             
             # Convert to torch tensor
             audio_tensor = torch.from_numpy(audio).float()
@@ -116,6 +133,7 @@ class SileroVAD:
             return speech_prob
         except Exception as e:
             logger.error(f"VAD error: {e}")
+            logger.error(f"Audio shape: {audio.shape}, sample_rate: {self.sample_rate}")
             return 1.0  # Assume speech on error
 
 
